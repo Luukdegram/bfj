@@ -64,11 +64,13 @@ const JitProgram = struct {
     /// and executes them
     /// NOTE: writes the bytes little-endian
     fn run(self: *JitProgram, program: Program) Error!void {
-        // const initial_memory = [_]u8{0} ** 30000;
-        var initial_memory = try std.ArrayList(u8).initCapacity(std.heap.page_allocator, 30000);
+        // load brainfuck memory
+        // pointer will be set to its first element
+        const bf_memory = try std.heap.page_allocator.alloc(u8, 30000);
+        std.mem.copy(u8, bf_memory, &std.mem.zeroes([30000]u8));
 
         try self.code.appendSlice(&.{ 0x49, 0xBD });
-        try self.code.writer().writeIntLittle(usize, @ptrToInt(initial_memory.items.ptr));
+        try self.code.writer().writeIntLittle(usize, @ptrToInt(bf_memory.ptr));
 
         for (program) |instr| switch (instr) {
             // increase pointer by 1
@@ -76,7 +78,7 @@ const JitProgram = struct {
             // decrease pointer by 1
             '<' => try self.code.appendSlice(&.{ 0x49, 0xFF, 0xCD }), // dec %r13
             // increase value at current pointer by 1
-            '+' => try self.code.appendSlice(&.{ 0x41, 0x80, 0x45, 0x00, 0x01 }), // addb $1, 0(%r13)
+            '+' => try self.code.appendSlice(&.{ 0x41, 0x80, 0x45, 0x00, 0x01 }), // add $1, 0(%r13)
             // decrease value at current pointer by 1
             '-' => try self.code.appendSlice(&.{ 0x41, 0x80, 0x6D, 0x00, 0x01 }), // sub $1, 0(%r13)
             // Write to stdout
@@ -87,7 +89,7 @@ const JitProgram = struct {
                 try self.code.appendSlice(&.{ 0x48, 0xC7, 0xC2, 0x01, 0x00, 0x00, 0x00 });
                 try self.code.appendSlice(&.{ 0x0F, 0x05 });
             },
-            // Read from stdind:
+            // Read from stdin:
             ',' => {
                 try self.code.appendSlice(&.{ 0x48, 0xC7, 0xC0, 0x00, 0x00, 0x00, 0x00 });
                 try self.code.appendSlice(&.{ 0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00 });
@@ -170,7 +172,23 @@ pub fn main() anyerror!void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
 
-    const program = try parse(&gpa.allocator, test_data);
+    const ally = &gpa.allocator;
+
+    var arg_it = std.process.args();
+    const exe = arg_it.next(ally).?;
+    ally.free(try exe);
+
+    const maybe_path = arg_it.next(ally) orelse return std.debug.print("Missing file argument\n", .{});
+    const path = try maybe_path;
+    defer ally.free(path);
+
+    const file = try std.fs.cwd().openFile(path, .{});
+    defer file.close();
+
+    const source = try file.readToEndAlloc(ally, std.math.maxInt(u64));
+    defer ally.free(source);
+
+    const program = try parse(&gpa.allocator, source);
     defer gpa.allocator.free(program);
 
     var jit = JitProgram.init(&gpa.allocator);
@@ -178,9 +196,3 @@ pub fn main() anyerror!void {
 
     try jit.run(program);
 }
-
-const test_data =
-    \\ ++++++++ ++++++++ ++++++++ ++++++++ ++++++++ ++++++++
-    \\ >+++++
-    \\ [<+.>-]
-;
